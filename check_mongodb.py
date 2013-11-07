@@ -62,11 +62,16 @@ def performance_data(perf_data,params):
         for p in params:
             p+=(None,None,None,None)
             param,param_name,warning,critical=p[0:4];
-            data +=" %s=%s" % (param_name,str(param))    
+            param=str(param);
+            minus_part=re.findall(r'^-*',param)[0]
+            number_part=float(re.findall(r'\d+\.*\d*',param)[0]);
+            units_part=re.compile(r'^-*\d+\.*\d*').sub('',param);
+            param="%s%.2f%s"%(minus_part,number_part, units_part)
+            data +=" %s=%s" % (param_name,str(param))
             if warning or critical:
                 warning=warning or 0
                 critical=critical or 0
-                data+=";%s;%s"%(warning,critical)
+                data+=";%.2f;%.2f"%(float(warning),float(critical))
     return data
 
 def numeric_type(param):
@@ -139,9 +144,9 @@ def main(argv):
         warning = str(options.warning or "")
         critical = str(options.critical or "")
     else:
-        warning = float(options.warning or 0) 
-        critical = float(options.critical or 0) 
-        
+        warning = float(options.warning or 0)
+        critical = float(options.critical or 0)
+
     action = options.action
     perf_data = options.perf_data
     max_lag = options.max_lag
@@ -151,7 +156,7 @@ def main(argv):
 
     if action == 'replica_primary' and replicaset is None:
         return "replicaset must be passed in when using replica_primary check"
-        
+
 
     #
     # moving the login up here and passing in the connection
@@ -183,7 +188,7 @@ def main(argv):
     elif action == "last_flush_time":
         return check_flushing(con, warning, critical, False, perf_data)
     elif action == "index_miss_ratio":
-        index_miss_ratio(con, warning, critical, perf_data)
+        return index_miss_ratio(con, host, warning, critical, perf_data)
     elif action == "databases":
         return check_databases(con, warning, critical,perf_data)
     elif action == "collections":
@@ -243,14 +248,14 @@ def exit_with_general_warning(e):
         return e
     else:
         print "WARNING - General MongoDB warning:", e
-    return 1    
+    return 1
 
 def exit_with_general_critical(e):
     if isinstance(e, SystemExit):
         return e
     else:
         print "CRITICAL - General MongoDB Error:", e
-    return 2    
+    return 2
 
 def set_read_preference(db):
     if pymongo.version >= "2.1":
@@ -300,12 +305,12 @@ def check_rep_lag(con,  warning, critical, perf_data,max_lag):
             if member.get('slaveDelay') is not None:
                 slaveDelays[member['host']] = member.get('slaveDelay')
             else:
-                slaveDelays[member['host']] = 0 
+                slaveDelays[member['host']] = 0
         #print slaveDelays
         # Find the primary and/or the current node
         primary_node = None
         host_node = None
-        
+
         host_status=con.admin.command("ismaster", "1")
         #print "Is master",host_status
         for member in rs_status["members"]:
@@ -332,7 +337,7 @@ def check_rep_lag(con,  warning, critical, perf_data,max_lag):
                 print "OK - This is the primary."
                 return 0
             else:
-                #get the maximal replication lag 
+                #get the maximal replication lag
                 data=""
                 maximal_lag=0
                 for member in rs_status['members']:
@@ -342,7 +347,7 @@ def check_rep_lag(con,  warning, critical, perf_data,max_lag):
                     maximal_lag = max(maximal_lag, replicationLag)
                 message = "Maximal lag is "+str( maximal_lag) + " seconds"
                 message +=performance_data(perf_data,[(maximal_lag,"replication_lag",warning, critical)])
-                return check_levels(maximal_lag,warning,critical,message) 
+                return check_levels(maximal_lag,warning,critical,message)
 
         # Find the difference in optime between current node and PRIMARY
         optime_lag = abs(primary_node["optimeDate"] - host_node["optimeDate"])
@@ -371,7 +376,7 @@ def check_memory(con, warning, critical, perf_data,mapped_memory):
         #
         message = "Memory Usage:"
         try:
-            mem_resident =float(data['mem']['resident']) / 1024.0 
+            mem_resident =float(data['mem']['resident']) / 1024.0
             message += " %.2fGB resident,"%( mem_resident)
         except:
             mem_resident = 0
@@ -386,18 +391,18 @@ def check_memory(con, warning, critical, perf_data,mapped_memory):
             mem_mapped = float(data['mem']['mapped']) / 1024.0
             message +=" %.2fGB mapped," % mem_mapped
         except:
-            mem_mapped = 0 
+            mem_mapped = 0
             message +=" mapped unsupported,"
         try:
             mem_mapped_journal = float(data['mem']['mappedWithJournal']) / 1024.0
             message +=" %.2fGB mappedWithJournal" % mem_mapped_journal
         except:
-            mem_mapped_journal = 0 
+            mem_mapped_journal = 0
         message +=performance_data(perf_data,[("%.2f" % mem_resident,"memory_usage",warning, critical),
                     ("%.2f" % mem_mapped,"memory_mapped"),("%.2f" % mem_virtual,"memory_virtual"),("%.2f" %mem_mapped_journal,"mappedWithJournal")])
         #added for unsupported systems like Solaris
-        if mapped_memory and mem_resident==0: 
-            return check_levels(mem_mapped,warning,critical,message) 
+        if mapped_memory and mem_resident==0:
+            return check_levels(mem_mapped,warning,critical,message)
         else:
             return check_levels(mem_resident,warning,critical,message)
 
@@ -445,14 +450,33 @@ def check_flushing(con, warning, critical, avg, perf_data):
     except Exception, e:
         return exit_with_general_critical(e)
 
-def index_miss_ratio(con, warning, critical, perf_data):
+def index_miss_ratio(con, host,warning, critical, perf_data):
     warning = warning or 10
     critical = critical or 30
     try:
         data=get_server_status(con)
 
         try:
-            miss_ratio = float(data['indexCounters']['btree']['missRatio'])
+          if data['version']<"2.4" :
+            accesses=data['indexCounters']['btree']['accesses']
+            hits=data['indexCounters']['btree']['hits']
+            misses=data['indexCounters']['btree']['misses']
+            resets=data['indexCounters']['btree']['resets']
+          else:
+            accesses=data['indexCounters']['accesses']
+            hits=data['indexCounters']['hits']
+            misses=data['indexCounters']['misses']
+            resets=data['indexCounters']['resets']
+          new_vals= [accesses, hits, misses, resets]
+          err,delta=  maintain_delta(new_vals, host, 'indexCounters')
+          if (err==0):
+            if ( delta[1]==0):
+              miss_ratio=0
+            else:
+              miss_ratio = delta[3]/delta[1]
+          else:
+            return exit_with_general_warning("problem reading data from temp file")
+
         except KeyError:
             not_supported_msg = "not supported on this platform"
             if data['indexCounters']['note'] == not_supported_msg:
@@ -473,14 +497,14 @@ def index_miss_ratio(con, warning, critical, perf_data):
 
 def check_replset_state(con,perf_data,warning="",critical=""):
     try:
-        warning = [int(x) for x in warning.split(",")] 
+        warning = [int(x) for x in warning.split(",")]
     except :
         warning = [0,3,5]
     try:
-        critical= [int(x) for x in critical.split(",") ] 
+        critical= [int(x) for x in critical.split(",") ]
     except :
         critical=[8,4,-1]
-        
+
     ok = range(-1,8) #should include the range of all posiible values
     try:
         try:
@@ -558,24 +582,23 @@ def check_collections(con, warning, critical,perf_data=None):
 def check_all_databases_size(con, warning, critical, perf_data):
     warning = warning or 100
     critical = critical or 1000
-
-    try: 
+    try:
         set_read_preference(con.admin)
         all_dbs_data = con.admin.command(pymongo.son_manipulator.SON([('listDatabases', 1)]))
     except:
         all_dbs_data = con.admin.command(son.SON([('listDatabases', 1)]))
-    
+
     total_storage_size=0
     message=""
     perf_data_param=[()]
     for db in all_dbs_data['databases']:
         database = db['name']
-        data = con[database].command('dbstats') 
-        storage_size = data['storageSize'] / 1024 / 1024
+        data = con[database].command('dbstats')
+        storage_size = round(data['storageSize'] / 1024 / 1024,1)
         message+="; Database %s size: %.0f MB"%(database,storage_size)
         perf_data_param.append((storage_size,database+"_database_size"))
         total_storage_size+=storage_size
-    
+
     perf_data_param[0]=(total_storage_size,"total_size",warning,critical)
     message+=performance_data(perf_data,perf_data_param)
     message="Total size: %.0f MB" % total_storage_size + message
@@ -611,9 +634,9 @@ def check_queues(con, warning, critical, perf_data):
     try:
         data=get_server_status(con)
 
-        total_queues = float(data['globalLock']['currentQueue']['total']) 
-        readers_queues = float(data['globalLock']['currentQueue']['readers']) 
-        writers_queues = float(data['globalLock']['currentQueue']['writers']) 
+        total_queues = float(data['globalLock']['currentQueue']['total'])
+        readers_queues = float(data['globalLock']['currentQueue']['readers'])
+        writers_queues = float(data['globalLock']['currentQueue']['writers'])
         message = "Current queue is : total = %d, readers = %d, writers = %d" % (total_queues, readers_queues, writers_queues)
         message+=performance_data(perf_data,[(total_queues, "total_queues",warning,critical),(readers_queues, "readers_queues"),(writers_queues,"writers_queues")])
         return check_levels(total_queues,warning,critical,message)
@@ -625,13 +648,13 @@ def check_oplog(con, warning, critical, perf_data):
     """ Checking the oplog time - the time of the log currntly saved in the oplog collection
     defaults:
         critical 4 hours
-        warning 24 hours 
+        warning 24 hours
     those can be changed as usual with -C and -W parameters"""
-    warning = warning or 24 
+    warning = warning or 24
     critical = critical or 4
     try:
         db = con.local
-        ol=db.system.namespaces.find_one({"name":"local.oplog.rs"}) 
+        ol=db.system.namespaces.find_one({"name":"local.oplog.rs"})
         if (db.system.namespaces.find_one({"name":"local.oplog.rs"}) != None) :
             oplog = "oplog.rs";
         else :
@@ -655,7 +678,7 @@ def check_oplog(con, warning, critical, perf_data):
         firstc = ol.find().sort("$natural",pymongo.ASCENDING).limit(1)[0]['ts']
         lastc = ol.find().sort("$natural",pymongo.DESCENDING).limit(1)[0]['ts']
         time_in_oplog= (lastc.as_datetime()-firstc.as_datetime())
-        message="Oplog saves "+ str(time_in_oplog) + " %d%% used" %ol_used_storage 
+        message="Oplog saves "+ str(time_in_oplog) + " %d%% used" %ol_used_storage
         try: #work starting from python2.7
             hours_in_oplog= time_in_oplog.total_seconds()/60/60
         except:
@@ -668,15 +691,15 @@ def check_oplog(con, warning, critical, perf_data):
         return exit_with_general_critical(e)
 
 def check_journal_commits_in_wl(con, warning, critical,perf_data):
-    """  Checking the number of commits which occurred in the db's write lock. 
-Most commits are performed outside of this lock; committed while in the write lock is undesirable. 
+    """  Checking the number of commits which occurred in the db's write lock.
+Most commits are performed outside of this lock; committed while in the write lock is undesirable.
 Under very high write situations it is normal for this value to be nonzero.  """
 
     warning = warning or 10
     critical = critical or 40
     try:
         data=get_server_status(con)
-        j_commits_in_wl = data['dur']['commitsInWriteLock'] 
+        j_commits_in_wl = data['dur']['commitsInWriteLock']
         message="Journal commits in DB write lock : %d" % j_commits_in_wl
         message+=performance_data(perf_data,[(j_commits_in_wl,"j_commits_in_wl",warning, critical)])
         return check_levels(j_commits_in_wl,warning, critical, message)
@@ -691,7 +714,7 @@ def check_journaled(con, warning, critical,perf_data):
     critical = critical or 40
     try:
         data=get_server_status(con)
-        journaled = data['dur']['journaledMB'] 
+        journaled = data['dur']['journaledMB']
         message="Journaled : %.2f MB" % journaled
         message+=performance_data(perf_data,[("%.2f"%journaled,"journaled",warning, critical)])
         return check_levels(journaled,warning, critical, message)
@@ -700,14 +723,14 @@ def check_journaled(con, warning, critical,perf_data):
         return exit_with_general_critical(e)
 
 def check_write_to_datafiles(con, warning, critical,perf_data):
-    """    Checking the average amount of data in megabytes written to the databases datafiles in the last four seconds. 
-As these writes are already journaled, they can occur lazily, and thus the number indicated here may be lower 
+    """    Checking the average amount of data in megabytes written to the databases datafiles in the last four seconds.
+As these writes are already journaled, they can occur lazily, and thus the number indicated here may be lower
 than the amount physically written to disk."""
     warning = warning or 20
     critical = critical or 40
     try:
         data=get_server_status(con)
-        writes = data['dur']['writeToDataFilesMB'] 
+        writes = data['dur']['writeToDataFilesMB']
         message="Write to data files : %.2f MB" % writes
         message+=performance_data(perf_data,[("%.2f" % writes,"write_to_data_files",warning, critical)])
         return check_levels(writes,warning, critical, message)
@@ -717,7 +740,7 @@ than the amount physically written to disk."""
 
 
 def get_opcounters(data,opcounters_name,host):
-    try : 
+    try :
         insert=data[opcounters_name]['insert']
         query=data[opcounters_name]['query']
         update=data[opcounters_name]['update']
@@ -736,7 +759,7 @@ def check_opcounters(con, host, warning, critical,perf_data):
     critical=critical or 15000
 
     data=get_server_status(con)
-    err1,delta_opcounters=get_opcounters(data,'opcounters',host) 
+    err1,delta_opcounters=get_opcounters(data,'opcounters',host)
     err2,delta_opcounters_repl=get_opcounters(data,'opcountersRepl',host)
     if err1==0 and err2==0:
         delta=[(x+y) for x,y in zip(delta_opcounters ,delta_opcounters_repl) ]
@@ -757,11 +780,11 @@ def check_current_lock(con, host, warning, critical,perf_data):
     critical = critical or 30
     data=get_server_status(con)
 
-    lockTime=float(data['globalLock']['lockTime']) 
-    totalTime=float(data['globalLock']['totalTime']) 
+    lockTime=float(data['globalLock']['lockTime'])
+    totalTime=float(data['globalLock']['totalTime'])
 
-    err,delta=maintain_delta([totalTime,lockTime],host,"locktime") 
-    if err==0: 
+    err,delta=maintain_delta([totalTime,lockTime],host,"locktime")
+    if err==0:
         lock_percentage = delta[2]/delta[1]*100     #lockTime/totalTime*100
         message = "Current Lock Percentage: %.2f%%" % lock_percentage
         message+=performance_data(perf_data,[("%.2f" % lock_percentage,"current_lock_percentage",warning,critical)])
@@ -776,11 +799,11 @@ def check_page_faults(con, host, warning, critical,perf_data):
     data=get_server_status(con)
 
     try:
-        page_faults=float(data['extra_info']['page_faults']) 
+        page_faults=float(data['extra_info']['page_faults'])
     except:
         # page_faults unsupported on the underlaying system
         return exit_with_general_critical("page_faults unsupported on the underlaying system")
-    
+
     err,delta=maintain_delta([page_faults],host,"page_faults")
     if err==0:
         page_faults_ps=delta[1]/delta[0]
@@ -789,17 +812,17 @@ def check_page_faults(con, host, warning, critical,perf_data):
         return check_levels(page_faults_ps,warning,critical,message)
     else:
         return exit_with_general_warning("problem reading data from temp file")
-    
+
 
 def check_asserts(con, host, warning, critical,perf_data):
     """ A function to get asserts from the system"""
     warning = warning or 1
-    critical = critical or 10 
+    critical = critical or 10
     data=get_server_status(con)
 
     asserts=data['asserts']
-   
-    #{ "regular" : 0, "warning" : 6, "msg" : 0, "user" : 12, "rollovers" : 0 } 
+
+    #{ "regular" : 0, "warning" : 6, "msg" : 0, "user" : 12, "rollovers" : 0 }
     regular=asserts['regular']
     warning_asserts=asserts['warning']
     msg=asserts['msg']
@@ -807,28 +830,28 @@ def check_asserts(con, host, warning, critical,perf_data):
     rollovers=asserts['rollovers']
 
     err,delta=maintain_delta([regular,warning_asserts,msg,user,rollovers],host,"asserts")
-    
+
     if err==0:
         if delta[5]!=0:
             #the number of rollovers were increased
             warning=-1 # no matter the metrics this situation should raise a warning
-            # if this is normal rollover - the warning will not appear again, but if there will be a lot of asserts 
+            # if this is normal rollover - the warning will not appear again, but if there will be a lot of asserts
             # the warning will stay for a long period of time
             # although this is not a usual situation
-        
+
         regular_ps=delta[1]/delta[0]
         warning_ps=delta[2]/delta[0]
         msg_ps=delta[3]/delta[0]
         user_ps=delta[4]/delta[0]
         rollovers_ps=delta[5]/delta[0]
         total_ps=regular_ps+warning_ps+msg_ps+user_ps
-        message = "Total asserts : %.2f ps" % total_ps 
+        message = "Total asserts : %.2f ps" % total_ps
         message+=performance_data(perf_data,[(total_ps,"asserts_ps",warning,critical),(regular_ps,"regular"),
                     (warning_ps,"warning"),(msg_ps,"msg"),(user_ps,"user")])
         return check_levels(total_ps,warning,critical,message)
     else:
         return exit_with_general_warning("problem reading data from temp file")
-     
+
 
 def get_stored_primary_server_name(db):
     """ get the stored primary server name from db. """
@@ -871,25 +894,25 @@ def build_file_name(host, action):
     return "/tmp/"+module_name+"_data/"+host+"-"+action+".data"
 
 def ensure_dir(f):
-    d = os.path.dirname(f) 
+    d = os.path.dirname(f)
     if not os.path.exists(d):
         os.makedirs(d)
-    
+
 def write_values(file_name,string):
     f=None
     try:
         f = open(file_name, 'w')
     except IOError,e:
-        #try creating 
+        #try creating
         if (e.errno==2):
             ensure_dir(file_name)
             f = open(file_name, 'w')
         else:
-            raise IOError(e); 
+            raise IOError(e);
     f.write(string)
     f.close()
     return 0
-    
+
 def read_values(file_name):
     data=None
     try:
@@ -911,8 +934,8 @@ def calc_delta(old,new):
     for i in range(0,len(old)):
        val=float(new[i])-float(old[i])
        if val<0:
-            val=new[i]      
-       delta.append(val) 
+            val=new[i]
+       delta.append(val)
     return 0, delta
 
 def maintain_delta(new_vals,host,action):
@@ -927,7 +950,7 @@ def maintain_delta(new_vals,host,action):
         err=2
     write_res=write_values(file_name,";".join(str(x) for x in new_vals))
     return err+write_res,delta
-     
+
 #
 # main app
 #
